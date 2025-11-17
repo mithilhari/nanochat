@@ -11,6 +11,11 @@ torchrun --standalone --nproc_per_node=8 -m scripts.mid_train -- --device_batch_
 
 from collections import deque
 import os
+os.environ["TORCH_COMPILE_DISABLE"]="1"
+os.environ["TORCHINDUCTOR_DISABLE"]="1"
+os.environ["AOTINDUCTOR_DISABLE"]="1"
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"]="0.0"
+import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import wandb
@@ -193,10 +198,22 @@ while True:
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
         with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = None #evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            print("Skipping validation on MPS")
+        
+    if val_bpb is not None:
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
-        if val_bpb < min_val_bpb:
-            min_val_bpb = val_bpb
+    else:
+        print0(f"Step {step:05d} | Validation skipped on MPS")
+        #print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+        if val_bpb is not None:
+            if val_bpb < min_val_bpb:
+                min_val_bpb = val_bpb
+                save_checkpoint(model, ckpt_manager, tag, step, distctx)
+        else:
+            # MPS: skip checkpointing based on validation
+            pass
+		
         wandb_run.log({
             "step": step,
             "total_training_flops": flops_so_far,
@@ -216,7 +233,7 @@ while True:
             [opt.state_dict() for opt in optimizers], # TODO: make sure saving across ranks is done correctly
             {
                 "step": step,
-                "val_bpb": val_bpb, # loss at last step
+               "val_bpb": val_bpb, # loss at last step
                 "model_config": {
                     "sequence_len": max_seq_len,
                     "vocab_size": tokenizer.get_vocab_size(),
